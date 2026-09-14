@@ -10,7 +10,7 @@ passar pelos checks automatizados.
 
 - Matheus Barros
 - Andre Marques
-- jackson Silva
+- Jackson Silva
 
 ## Objetivo
 
