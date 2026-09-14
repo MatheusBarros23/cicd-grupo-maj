@@ -67,9 +67,45 @@ jobs:
       - name: Run pip-audit
         run: pip-audit
 
+  trivy:
+    name: Vulnerability scan (Trivy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-fs
+
+      - name: Upload SARIF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+
   publish:
     name: Publish image to GHCR
-    needs: [lint, test, security]
+    needs: [lint, test, security, trivy]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -108,7 +144,7 @@ jobs:
 
   notify:
     name: Notify pipeline result
-    needs: [lint, test, security, publish]
+    needs: [lint, test, security, trivy, publish]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
