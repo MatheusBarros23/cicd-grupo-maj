@@ -115,6 +115,26 @@ ambiente em vez de passar `-r requirements.txt` porque aquele arquivo contém
 `-e .`, e requisitos editáveis não são analisáveis a partir do manifesto —
 auditar o ambiente cobre o pacote, as dependências de dev e todas as transitivas.
 
+### Job `trivy`
+
+Roda o Trivy em modo `scan-type: fs`, que analisa arquivos e manifestos do
+repositório sem precisar buildar a imagem. Cobre mais que o `pip-audit`: além das
+bibliotecas Python, alcança os pacotes do sistema operacional e outros
+ecossistemas presentes no repo.
+
+Está configurado com `exit-code: '0'` **de propósito**: o Trivy aqui é camada de
+visibilidade, não gate. O bloqueio de dependências Python é responsabilidade do
+`pip-audit`, que falha o build. Assim evitamos deixar a `main` eternamente
+vermelha por CVE de pacote de sistema que não está sob nosso controle, sem perder
+o relatório. `ignore-unfixed: true` reforça isso, descartando CVE sem patch
+disponível, e `severity: HIGH,CRITICAL` mantém o relatório no que é acionável.
+
+O resultado sai em `format: sarif` e é enviado para **Security → Code scanning**
+via `github/codeql-action/upload-sarif`, que é o motivo do
+`security-events: write` nas `permissions` deste job — e só dele. O mesmo SARIF
+também sobe como artefato do run, o que garante acesso ao relatório mesmo quando
+o code scanning não está disponível.
+
 ### Job `publish`
 
 Depende de `lint`, `test` e `security`, e só executa em `push` na `main` — nunca
