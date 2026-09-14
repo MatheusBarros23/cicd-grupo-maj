@@ -6,6 +6,12 @@ Este projeto demonstra boas práticas de integração contínua usando GitHub Ac
 com o pipeline atuando como *quality gate*: nenhum código entra na `main` sem
 passar pelos checks automatizados.
 
+## Grupo
+
+- Matheus Barros
+- Andre Marques
+- jackson Silva
+
 ## Objetivo
 
 Implementar uma base mínima e profissional de desenvolvimento com:
