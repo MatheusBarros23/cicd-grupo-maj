@@ -1,9 +1,5 @@
 __pycache__/
-*.pyc
-*.pyo
-*.egg
-*.egg-info/
-.eggs/
+*.py[cod]
 
 .venv/
 venv/
@@ -11,13 +7,8 @@ venv/
 .python-version
 
 .pytest_cache/
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
-
-build/
-dist/
+.ruff_cache/
+*.db
 
 .claude
 .vscode/

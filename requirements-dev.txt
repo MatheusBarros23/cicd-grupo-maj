@@ -1,5 +1,6 @@
-pytest>=8.0.0
-pytest-cov>=5.0.0
-flake8>=7.0.0
-build>=1.2.0
-pip-audit>=2.7.0
+# ABOUTME: Development and CI dependencies for testing, linting and auditing.
+# ABOUTME: Installed on top of requirements.txt in the CI pipeline.
+-r requirements.txt
+pytest==8.3.3
+ruff==0.6.9
+pip-audit==2.7.3
