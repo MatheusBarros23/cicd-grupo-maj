@@ -15,12 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ci-cd-activity
+  IMAGE_NAME: app-k8s-todolist
   PYTHON_DEFAULT: '3.12'
 
 jobs:
   lint:
-    name: Lint (flake8)
+    name: Lint (ruff)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -37,8 +37,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run flake8
-        run: flake8 src tests
+      - name: Run ruff
+        run: ruff check .
 
   test:
     name: Test
@@ -138,9 +138,10 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            IMAGE_TAGS=${{ steps.image.outputs.repo }}:${{ github.sha }}
           tags: |
             ${{ steps.image.outputs.repo }}:${{ github.sha }}
-            ${{ steps.image.outputs.repo }}:latest
 
   notify:
     name: Notify pipeline result
