@@ -120,7 +120,8 @@ auditar o ambiente cobre o pacote, as dependências de dev e todas as transitiva
 Roda o Trivy em modo `scan-type: fs`, que analisa arquivos e manifestos do
 repositório sem precisar buildar a imagem. Cobre mais que o `pip-audit`: além das
 bibliotecas Python, alcança os pacotes do sistema operacional e outros
-ecossistemas presentes no repo.
+ecossistemas presentes no repo. Roda em todo `pull_request` e `push`, como
+camada rápida de visibilidade (shift-left) — não depende do build da imagem.
 
 Está configurado com `exit-code: '0'` **de propósito**: o Trivy aqui é camada de
 visibilidade, não gate. O bloqueio de dependências Python é responsabilidade do
@@ -135,15 +136,34 @@ via `github/codeql-action/upload-sarif`, que é o motivo do
 também sobe como artefato do run, o que garante acesso ao relatório mesmo quando
 o code scanning não está disponível.
 
-### Job `publish`
+### Job `build`
 
 Depende de `lint`, `test` e `security`, e só executa em `push` na `main` — nunca
-em pull request. Está associado ao environment `production`, o que exige
-aprovação humana antes de publicar. Faz login no GitHub Container Registry com o
-`GITHUB_TOKEN` do próprio workflow — sem PAT e sem credencial commitada — e
-publica a imagem com duas tags: o SHA do commit (que é o que permite rollback) e
-`latest`. O nome do owner é normalizado para minúsculas porque referências de
-registry não aceitam maiúsculas.
+em pull request, para não pagar o custo de build em todo PR. Builda a imagem
+Docker localmente (`push: false`, `load: true`), salva com `docker save` e sobe
+como artefato do run (`docker-image`). Essa é a mesma imagem que os jobs
+seguintes escaneiam e publicam — não há rebuild entre o scan e o push.
+
+### Job `trivy_image`
+
+Depende de `build` e só executa em `push` na `main`. Baixa o artefato da imagem,
+carrega com `docker load` e roda o Trivy em modo `scan-type: image` sobre ela —
+complementando o scan de filesystem com o que só aparece na imagem final
+(camadas da base image, pacotes de sistema instalados no build). Mesma política
+de `exit-code: '0'`/`ignore-unfixed`/`severity` do job `trivy`, pelo mesmo motivo:
+visibilidade, não gate. Resultado também vai para Code scanning e como artefato
+(`trivy-image-results`).
+
+### Job `publish`
+
+Depende de `lint`, `test`, `security`, `trivy`, `build` e `trivy_image`, e só
+executa em `push` na `main` — nunca em pull request. Está associado ao
+environment `production`, o que exige aprovação humana antes de publicar. Baixa
+o artefato de imagem gerado pelo job `build` (não builda de novo), faz login no
+GitHub Container Registry com o `GITHUB_TOKEN` do próprio workflow — sem PAT e
+sem credencial commitada — e publica a imagem com duas tags: o SHA do commit
+(que é o que permite rollback) e `latest`. O nome do owner é normalizado para
+minúsculas porque referências de registry não aceitam maiúsculas.
 
 ### Job `notify`
 
