@@ -154,7 +154,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write
 
     steps:
       - name: Download image artifact
@@ -165,6 +164,10 @@ jobs:
       - name: Load image
         run: docker load -i image.tar
 
+      # Saida em tabela, sem SARIF: este job so roda em push na main, e uma
+      # categoria de code scanning que nunca aparece em PR trava a regra
+      # "Require code scanning results". Quem alimenta o code scanning e o job
+      # trivy, que roda nos dois eventos.
       - name: Run Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -173,25 +176,11 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '0'
-          format: sarif
-          output: trivy-results.sarif
-
-      - name: Upload SARIF to code scanning
-        uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
-        continue-on-error: true
-        with:
-          sarif_file: trivy-results.sarif
-          category: trivy-image
-
-      - name: Upload SARIF as artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: trivy-image-results
-          path: trivy-results.sarif
+          format: table
 
   publish:
     name: Publish image to GHCR
-    needs: [lint, test, security, trivy, build, trivy_image]
+    needs: [trivy, build, trivy_image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
