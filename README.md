@@ -109,6 +109,51 @@ Todas as actions são fixadas por SHA de commit, não por tag — tag é mutáve
 quem controlar a conta do mantenedor passaria a executar código no pipeline com
 acesso aos secrets.
 
+O `concurrency` cancela runs anteriores da mesma ref: um push novo torna o run
+antigo obsoleto, e não há motivo para pagar por ele até o fim.
+
+### O que roda em cada evento
+
+Não é o mesmo pipeline nos dois casos. Em pull request rodam apenas os gates de
+código; o que envolve imagem só acontece depois que a mudança entra na `main`.
+
+```mermaid
+flowchart LR
+    subgraph gates["Quality gates — pull request e push na main"]
+        lint["Lint<br/>(ruff)"]
+        test["Test<br/>3.11 · 3.12 · 3.13"]
+        sec["Dependency audit<br/>(pip-audit)"]
+        tfs["Trivy<br/>(filesystem)"]
+    end
+
+    subgraph entrega["Entrega da imagem — somente push na main"]
+        build["Build image<br/>(salva artefato)"]
+        timg["Trivy<br/>(imagem)"]
+        pub["Publish GHCR<br/>environment: production"]
+    end
+
+    lint --> build
+    test --> build
+    sec --> build
+    build --> timg
+    timg --> pub
+    tfs --> pub
+```
+
+O `notify` ficou fora do diagrama de propósito: ele depende de todos os sete jobs
+acima e roda com `if: always()`, então desenhar as sete arestas só poluiria a
+topologia sem acrescentar informação.
+
+Os quatro primeiros são os *quality gates* que bloqueiam o merge — são eles que
+estão marcados como required status checks na proteção da `main`. Os três do meio
+formam a cadeia de entrega da imagem, e não fazem sentido em PR: não se publica
+imagem de código que ainda não foi aprovado.
+
+Consequência prática: em pull request, `build`, `trivy_image` e `publish`
+aparecem como **skipped**. Isso é o comportamento esperado, não falha — e é por
+isso que nenhum deles pode ser marcado como required check, já que check que
+nunca reporta em PR travaria o merge para sempre.
+
 ### Job `lint`
 
 Roda `ruff check .` com as regras do `pyproject.toml` (`E`, `F`, `W`, `I`, `UP`,
@@ -148,8 +193,13 @@ relatório. `ignore-unfixed: true` reforça isso e `severity: HIGH,CRITICAL`
 mantém o resultado no que é acionável.
 
 O resultado sai em SARIF e vai para **Security → Code scanning**, o que explica o
-`security-events: write` nas `permissions` deste job — e só dele. O mesmo SARIF
-sobe como artefato do run, garantindo acesso ao relatório de qualquer forma.
+`security-events: write` nas `permissions` deste job — e só dele; todos os outros
+ficam com `contents: read`. O mesmo SARIF sobe como artefato do run
+(`trivy-fs-results`), garantindo acesso ao relatório de qualquer forma.
+
+Este é o **único** job que alimenta o code scanning, e isso é deliberado. A regra
+"Require code scanning results" na proteção da `main` cobra resultados em pull
+request; como este job roda nos dois eventos, ela sempre encontra o que espera.
 
 ### Job `build`
 
@@ -159,6 +209,11 @@ Docker localmente (`push: false`, `load: true`), salva com `docker save` e sobe
 como artefato do run (`docker-image`). Essa é a mesma imagem que os jobs
 seguintes escaneiam e publicam — não há rebuild entre o scan e o push.
 
+O `build-arg IMAGE_TAGS` é injetado aqui, e não no `publish`: no `Dockerfile` ele
+vira `ENV` gravado em build time, então precisa existir no momento em que a
+imagem é construída. A aplicação lê essa variável e exibe a tag no rodapé — dá
+para abrir a app e confirmar visualmente qual build está no ar.
+
 ### Job `trivy_image`
 
 Depende de `build` e só executa em `push` na `main`. Baixa o artefato da imagem,
@@ -166,8 +221,14 @@ carrega com `docker load` e roda o Trivy em modo `scan-type: image` sobre ela �
 complementando o scan de filesystem com o que só aparece na imagem final
 (camadas da base image, pacotes de sistema instalados no build). Mesma política
 de `exit-code: '0'`/`ignore-unfixed`/`severity` do job `trivy`, pelo mesmo motivo:
-visibilidade, não gate. Resultado também vai para Code scanning e como artefato
-(`trivy-image-results`).
+visibilidade, não gate.
+
+A saída aqui é `format: table`, no log do job, e **não** sobe SARIF. O motivo é
+concreto: o code scanning memoriza cada categoria que recebe e passa a exigi-la
+nos commits seguintes. Como este job é push-only, a categoria dele nunca
+apareceria em pull request, e a regra "Require code scanning results" travaria
+todo merge esperando um resultado que não vem. Por não subir SARIF, este job
+também não precisa de `security-events: write`.
 
 ### Job `publish`
 
@@ -180,16 +241,32 @@ sem credencial commitada — e publica a imagem com duas tags: o SHA do commit
 (que é o que permite rollback) e `latest`. O nome do owner é normalizado para
 minúsculas porque referências de registry não aceitam maiúsculas.
 
-A imagem é marcada com o SHA do commit, não com `latest`: tag imutável é o que
-permite saber qual código está rodando e fazer rollback para um ponto exato. O
-mesmo valor é injetado como `build-arg IMAGE_TAGS`, que a aplicação exibe no
-rodapé — dá para confirmar visualmente qual build está no ar.
+As duas tags têm papéis distintos. O SHA é imutável: é ele que permite saber
+exatamente qual código está rodando e voltar para um ponto específico num
+rollback. O `latest` é conveniência, para quem só quer o topo da `main`. O deploy
+da Atividade 2 deve referenciar o SHA, não o `latest`.
+
+Vale notar o que o `publish` **não** faz: ele não builda. Só carrega o artefato,
+aplica a segunda tag e dá `docker push`. Isso é deliberado — se ele reconstruísse
+a imagem, publicaria bytes diferentes dos que o `trivy_image` auditou, e a cadeia
+de scan perderia sentido.
 
 ### Job `notify`
 
-Roda com `if: always()`, justamente para avisar quando algo falhou, e envia o
-resultado por webhook. O envio é pulado enquanto o secret `NOTIFY_WEBHOOK_URL`
-não existir, para que a ausência de webhook não deixe o pipeline vermelho.
+Roda com `if: always()`, justamente para avisar quando algo falhou — um job que
+dependesse do sucesso dos anteriores nunca notificaria a falha, que é o caso que
+importa.
+
+O status é `SUCESSO` só se `lint`, `test`, `security` e `trivy` tiverem passado, e
+se `build`, `trivy_image` e `publish` não tiverem falhado. A distinção é
+necessária: em pull request esses três são *skipped*, e exigir `success` deles
+daria falso negativo em todo PR.
+
+O payload é montado com `jq` em vez de string interpolada, para que nome de branch
+com caractere especial não quebre o JSON. O formato é o do Discord (`embeds`), e
+inclui sempre o link do run — notificação que não leva ao log gera mais pergunta
+que resposta. O envio é pulado enquanto o secret `NOTIFY_WEBHOOK_URL` não existir,
+para que a ausência de webhook não deixe o pipeline vermelho.
 
 ## Como demonstrar o shift-left
 
