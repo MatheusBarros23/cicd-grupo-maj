@@ -80,7 +80,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -91,14 +91,14 @@ jobs:
           output: trivy-results.sarif
 
       - name: Upload SARIF to code scanning
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
           category: trivy-fs
 
       - name: Upload SARIF as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: trivy-fs-results
           path: trivy-results.sarif
@@ -132,13 +132,15 @@ jobs:
           context: .
           push: false
           load: true
+          build-args: |
+            IMAGE_TAGS=${{ steps.image.outputs.repo }}:${{ github.sha }}
           tags: ${{ steps.image.outputs.repo }}:${{ github.sha }}
 
       - name: Save image as artifact
         run: docker save "${{ steps.image.outputs.repo }}:${{ github.sha }}" -o image.tar
 
       - name: Upload image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: docker-image
           path: image.tar
@@ -156,7 +158,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: docker-image
 
@@ -164,7 +166,7 @@ jobs:
         run: docker load -i image.tar
 
       - name: Run Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
           image-ref: ${{ needs.build.outputs.repo }}:${{ github.sha }}
@@ -175,14 +177,14 @@ jobs:
           output: trivy-results.sarif
 
       - name: Upload SARIF to code scanning
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image
 
       - name: Upload SARIF as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: trivy-image-results
           path: trivy-results.sarif
@@ -200,7 +202,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: docker-image
 
@@ -217,15 +219,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          push: true
-          build-args: |
-            IMAGE_TAGS=${{ steps.image.outputs.repo }}:${{ github.sha }}
-          tags: |
-            ${{ steps.image.outputs.repo }}:${{ github.sha }}
+      - name: Push image
+        run: |
+          docker push "${{ needs.build.outputs.repo }}:${{ github.sha }}"
+          docker push "${{ needs.build.outputs.repo }}:latest"
 
   notify:
     name: Notify pipeline result
