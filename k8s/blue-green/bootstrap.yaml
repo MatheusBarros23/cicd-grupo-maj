@@ -29,9 +29,7 @@ spec:
     spec:
       containers:
         - name: todolist
-          # Troque SEU_USUARIO_DOCKERHUB pelo seu usuário do Docker Hub antes do
-          # primeiro deploy: o bootstrap sobe as duas cores com esta imagem.
-          image: SEU_USUARIO_DOCKERHUB/app-k8s-todolist:latest
+          image: ghcr.io/matheusbarros23/app-k8s-todolist:latest
           ports:
             - containerPort: 5000
           env:
@@ -80,9 +78,7 @@ spec:
     spec:
       containers:
         - name: todolist
-          # Troque SEU_USUARIO_DOCKERHUB pelo seu usuário do Docker Hub antes do
-          # primeiro deploy: o bootstrap sobe as duas cores com esta imagem.
-          image: SEU_USUARIO_DOCKERHUB/app-k8s-todolist:latest
+          image: ghcr.io/matheusbarros23/app-k8s-todolist:latest
           ports:
             - containerPort: 5000
           env:
