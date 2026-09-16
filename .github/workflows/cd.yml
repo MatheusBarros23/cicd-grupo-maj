@@ -1,0 +1,128 @@
+name: Rolling deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag da imagem no GHCR (prefira o SHA do commit)'
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: app-k8s-todolist
+  NAMESPACE: todolist
+  INGRESS_HOST: todolist.local
+  MANIFEST: k8s/todolist.yaml
+
+jobs:
+  deploy:
+    name: Deploy to kind
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configure SSH key
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          if [ -z "$SSH_KEY" ] || [ -z "$EC2_HOST" ] || [ -z "$EC2_USER" ]; then
+            echo "::error::Cadastre os secrets EC2_SSH_KEY, EC2_HOST e EC2_USER."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Mesma derivacao do job publish do ci.yml: o owner vem de
+      # github.repository_owner em minusculas, porque referencia de registry
+      # nao aceita maiusculas.
+      - name: Resolve image reference
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          repo="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/$IMAGE_NAME"
+          echo "ref=${repo}:${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Pin image tag in manifest
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          sed -i -E "s|^([[:space:]]*)image: .*|\1image: ${IMAGE}|" "$MANIFEST"
+          grep -n 'image:' "$MANIFEST"
+          # Sem esta guarda, um sed que nao casa passaria em silencio e o deploy
+          # subiria a imagem antiga.
+          grep -qF "image: ${IMAGE}" "$MANIFEST" || {
+            echo "::error::A substituicao da imagem nao foi aplicada em $MANIFEST."
+            exit 1
+          }
+
+      - name: Copy manifest to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$MANIFEST" "$EC2_USER@$EC2_HOST:~/todolist.yaml"
+
+      # O rollout status e o GATE: se o pod novo nao fica Ready no prazo, o step
+      # falha e o deploy e reprovado.
+      - name: Apply and wait for rollout
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          KIND_CLUSTER: ${{ vars.KIND_CLUSTER || 'devops-labs' }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" bash -s <<EOF
+          set -euo pipefail
+          kubectl config use-context "kind-${KIND_CLUSTER}"
+          kubectl apply -f ~/todolist.yaml
+          kubectl rollout status deployment/todolist -n ${NAMESPACE} --timeout=120s
+          EOF
+
+      # Prova o caminho inteiro: ingress -> Service -> pod -> banco. O /healthz
+      # executa um SELECT 1 e devolve 503 se o banco nao responder.
+      - name: Smoke test /healthz through the ingress
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" bash -s <<EOF
+          set -euo pipefail
+          for _ in \$(seq 1 20); do
+            if curl -fsS -H "Host: ${INGRESS_HOST}" http://localhost/healthz; then
+              echo
+              echo "smoke test OK em ${INGRESS_HOST}"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "smoke test falhou: /healthz nao respondeu em 60s"
+          exit 1
+          EOF
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          {
+            echo "### Rolling deployment"
+            echo ""
+            echo "| campo | valor |"
+            echo "|---|---|"
+            echo "| imagem | \`${IMAGE}\` |"
+            echo "| namespace | \`${NAMESPACE}\` |"
+            echo "| host | \`${INGRESS_HOST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
