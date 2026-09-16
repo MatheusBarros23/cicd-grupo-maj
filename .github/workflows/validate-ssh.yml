@@ -1,0 +1,42 @@
+name: Validate SSH to EC2
+
+# Disparo manual apenas: a validacao e feita sob demanda, quando a EC2 esta de pe
+# e os secrets estao cadastrados. Rodar automaticamente so produziria falha nos
+# momentos em que o cluster esta parado.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: SSH into EC2 and reach kind
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure SSH key
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          if [ -z "$SSH_KEY" ] || [ -z "$EC2_HOST" ]; then
+            echo "::error::Cadastre os secrets EC2_SSH_KEY e EC2_HOST no repositorio."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Select kind context and list namespaces
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          KIND_CLUSTER: ${{ vars.KIND_CLUSTER || 'devops-labs' }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 \
+              -o StrictHostKeyChecking=accept-new \
+              "$EC2_USER@$EC2_HOST" \
+              "kubectl config use-context kind-${KIND_CLUSTER} && kubectl get namespaces"
