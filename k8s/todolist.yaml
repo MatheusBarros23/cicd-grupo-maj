@@ -23,6 +23,16 @@ spec:
       labels:
         app: todolist
     spec:
+      # O create_all() da app roda no import: sem o banco de pe, o pod entra em
+      # CrashLoopBackOff ate o Postgres subir. Esperar aqui deixa o primeiro
+      # deploy deterministico.
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z postgres.database.svc.cluster.local 5432; do echo "aguardando postgres"; sleep 2; done
       containers:
         - name: todolist
           image: ghcr.io/matheusbarros23/app-k8s-todolist:latest
@@ -33,6 +43,15 @@ spec:
               value: "5000"
             - name: APP_COLOR
               value: purple
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # O $(VAR) e interpolado pelo Kubernetes a partir das env anteriores,
+            # entao a senha nunca aparece literal no manifest.
+            - name: DATABASE_URI
+              value: postgresql+psycopg2://todolist:$(POSTGRES_PASSWORD)@postgres.database.svc.cluster.local:5432/todolist
           livenessProbe:
             httpGet:
               path: /healthz
@@ -45,12 +64,6 @@ spec:
               port: 5000
             initialDelaySeconds: 5
             periodSeconds: 10
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

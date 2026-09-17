@@ -1,0 +1,95 @@
+# ABOUTME: Postgres para a todolist, em namespace proprio, compartilhado pelas duas
+# ABOUTME: estrategias de deploy (rolling e blue/green) via DNS de cluster.
+#
+# A Secret postgres-credentials NAO esta neste arquivo de proposito: senha em
+# manifest versionado e credencial commitada. Ela e criada fora do repo, a partir
+# do secret POSTGRES_PASSWORD do GitHub. Ver README, secao de persistencia.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+---
+# Service headless: com uma replica, o DNS postgres.database.svc.cluster.local
+# resolve direto para o IP do pod, que e o que a app precisa.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: database
+  labels:
+    app: postgres
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: database
+  labels:
+    app: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: todolist
+            - name: POSTGRES_USER
+              value: todolist
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            # Subdiretorio de proposito: o Postgres recusa inicializar num
+            # diretorio que ja tenha conteudo (lost+found, por exemplo), e o
+            # ponto de montagem do PVC costuma ter.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "todolist", "-d", "todolist"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "todolist", "-d", "todolist"]
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

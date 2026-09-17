@@ -27,6 +27,13 @@ spec:
         app: todolist
         color: blue
     spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z postgres.database.svc.cluster.local 5432; do echo "aguardando postgres"; sleep 2; done
       containers:
         - name: todolist
           image: ghcr.io/matheusbarros23/app-k8s-todolist:latest
@@ -37,6 +44,13 @@ spec:
               value: "5000"
             - name: APP_COLOR
               value: blue
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: DATABASE_URI
+              value: postgresql+psycopg2://todolist:$(POSTGRES_PASSWORD)@postgres.database.svc.cluster.local:5432/todolist
           livenessProbe:
             httpGet:
               path: /healthz
@@ -49,12 +63,6 @@ spec:
               port: 5000
             initialDelaySeconds: 5
             periodSeconds: 10
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -76,6 +84,13 @@ spec:
         app: todolist
         color: green
     spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z postgres.database.svc.cluster.local 5432; do echo "aguardando postgres"; sleep 2; done
       containers:
         - name: todolist
           image: ghcr.io/matheusbarros23/app-k8s-todolist:latest
@@ -86,6 +101,13 @@ spec:
               value: "5000"
             - name: APP_COLOR
               value: green
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: password
+            - name: DATABASE_URI
+              value: postgresql+psycopg2://todolist:$(POSTGRES_PASSWORD)@postgres.database.svc.cluster.local:5432/todolist
           livenessProbe:
             httpGet:
               path: /healthz
@@ -98,12 +120,6 @@ spec:
               port: 5000
             initialDelaySeconds: 5
             periodSeconds: 10
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          emptyDir: {}
 ---
 # Fixed per-color Service (direct access for testing the blue slot).
 apiVersion: v1
