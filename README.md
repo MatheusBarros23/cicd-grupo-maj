@@ -305,3 +305,145 @@ git checkout -b demo/falha-teste
 
 O job `Test` fica vermelho e o log do `pytest` mostra exatamente qual asserção
 falhou, em qual versão do Python.
+
+## Arquitetura de deploy (CD)
+
+O deploy leva uma imagem já publicada no GHCR até um cluster `kind` que roda numa
+EC2. O runner hospedado do GitHub faz papel de **operador remoto**: ele já tem o
+repositório em checkout, então copia o manifesto por `scp` e executa `kubectl` por
+`ssh`. Nada é clonado dentro da VM.
+
+```mermaid
+flowchart LR
+    disp["workflow_dispatch<br/>image_tag / color"] --> runner["GitHub runner"]
+    runner -->|scp manifesto| ec2["EC2"]
+    runner -->|ssh kubectl| ec2
+    ec2 --> kind["cluster kind"]
+    kind --> ing["ingress-nginx :80<br/>roteia por Host"]
+    ing --> rolling["namespace todolist<br/>todolist.local"]
+    ing --> bg["namespace todolist-bg<br/>todolist-bg.local"]
+```
+
+Decisão deliberada: **não usamos runner self-hosted.** Ele daria acesso direto ao
+cluster, mas em repositório público qualquer pessoa poderia abrir um PR e executar
+código arbitrário na instância. O custo é precisar da chave SSH como secret.
+
+Os Services são todos `ClusterIP` — nada de NodePort. A entrada é sempre o
+ingress-nginx na porta 80 do nó, com roteamento por `Host`. Consequência prática:
+adicionar rota é aplicar um `Ingress`, sem abrir porta no Security Group.
+
+As duas estratégias **coexistem**, em namespaces e hosts distintos, então dá para
+demonstrar uma depois da outra sem teardown no meio.
+
+| Estratégia | Workflow(s) | Namespace | Host |
+|---|---|---|---|
+| Rolling Update | `cd.yml` | `todolist` | `todolist.local` |
+| Blue/Green | `cd-blue-green.yml` + `cd-blue-green-switch.yml` | `todolist-bg` | `todolist-bg.local` (produção), `blue.`/`green.todolist-bg.local` (slots) |
+
+Todos os três são `workflow_dispatch`: deploy é decisão, não consequência
+automática de um merge.
+
+### Rolling Update — `cd.yml`
+
+Input: `image_tag`. O workflow deriva a referência completa da imagem de
+`github.repository_owner` (a mesma lógica do job `publish`), reescreve a linha
+`image:` do `k8s/todolist.yaml` com `sed`, copia por `scp` e aplica.
+
+O `kubectl rollout status --timeout=120s` é o **gate**: `kubectl apply` num
+Deployment aciona o RollingUpdate, que sobe o pod novo, espera a `readinessProbe`
+e só então remove o antigo. Se o pod novo não fica `Ready`, o step falha.
+
+O último step é o smoke test: `curl -H "Host: todolist.local" .../healthz` através
+do ingress, com retry. Prova o caminho inteiro — ingress → Service → pod → banco.
+
+### Blue/Green — deploy e switch separados
+
+As duas operações estão em workflows distintos de propósito: preparar a versão é
+uma ação, virar o tráfego é outra.
+
+**`cd-blue-green.yml`** — inputs `color` e `image_tag`. Aplica o
+`k8s/blue-green/bootstrap.yaml` se o namespace ainda não existir, faz
+`kubectl set image` **somente no Deployment da cor escolhida**, espera o rollout e
+faz smoke test no host fixo do slot (`green.todolist-bg.local`). Não toca em
+produção. Se a cor escolhida já for a ativa, emite um warning — publicar na cor que
+está em produção anula a rede de proteção da estratégia.
+
+**`cd-blue-green-switch.yml`** — input `color`. Antes de virar, confirma que o slot
+alvo responde no `/healthz` do host dele; slot doente **aborta o cutover** com
+produção intacta. O switch em si é um `kubectl patch` no selector do Service de
+produção:
+
+```bash
+kubectl patch svc todolist -n todolist-bg \
+  -p '{"spec":{"selector":{"app":"todolist","color":"green"}}}'
+```
+
+**Ingress e hosts nunca mudam.** Essa é a decisão central: o cutover é uma mudança
+mínima em dado declarativo, e é justamente o que o torna instantâneo e reversível.
+Trocar tráfego recriando o Ingress funcionaria, mas perderia essa propriedade.
+
+Cada Deployment sobe com o seu `APP_COLOR`, então a interface muda de cor no
+switch — o efeito é visível a olho nu, sem precisar olhar log.
+
+### Como fazer rollback
+
+**Blue/Green — imediato.** Rode o `cd-blue-green-switch.yml` novamente com a cor
+anterior. Funciona na hora porque a cor antiga **continua rodando**: não escalamos
+para zero. O log do switch imprime o comando exato, incluindo a cor de onde você
+veio, para servir na hora do incidente.
+
+```bash
+gh workflow run cd-blue-green-switch.yml -f color=blue
+```
+
+**Rolling Update — não é automático.** Duas opções:
+
+```bash
+# redeployar a tag anterior pelo proprio pipeline
+gh workflow run cd.yml -f image_tag=<sha-anterior>
+
+# ou desfazer a ultima revisao, na VM
+kubectl rollout undo deployment/todolist -n todolist
+```
+
+Rollback automático no rolling exigiria `helm upgrade --atomic`. É limitação
+consciente, não esquecimento.
+
+### Antes de rodar qualquer deploy
+
+Valide o canal: **Actions → Validate SSH to EC2 → Run workflow**. Ele entra na EC2,
+seleciona o contexto do kind e lista os namespaces. Deploy sobre canal não validado
+transforma erro de infra em erro de pipeline, e você debuga o lugar errado.
+
+Secrets e variables necessários:
+
+| Nome | Tipo | Para quê |
+|---|---|---|
+| `EC2_SSH_KEY` | secret | chave privada completa, de `BEGIN` a `END` |
+| `EC2_HOST` | secret | IPv4 público da EC2 |
+| `EC2_USER` | secret | usuário SSH da VM |
+| `KIND_CLUSTER` | **variable** | nome do cluster kind (default `devops-labs`) |
+
+> **A pegadinha do IP:** o IPv4 público muda a cada stop/start da EC2. Atualize o
+> `EC2_HOST` **antes** de rodar qualquer workflow — o sintoma de esquecer é
+> `Connection timed out` em todos os deploys.
+
+Para acessar pelo navegador, mapeie os hosts no seu `/etc/hosts`:
+
+```
+<IP_PUBLICO_DA_EC2> todolist.local todolist-bg.local blue.todolist-bg.local green.todolist-bg.local
+```
+
+### Persistência: SQLite em `emptyDir`
+
+O banco fica em `/data/todos.db` num volume que vive e morre com o pod. Isso é
+escolha deliberada para manter o lab leve, e tem consequências que vale nomear:
+cada pod tem o seu banco, reiniciar o pod zera os dados, e trocar de cor no
+blue/green "reinicia" a lista porque é outro Deployment. Como só uma cor serve
+produção por vez, não há incoerência de leitura — mas não há continuidade.
+
+É também por isso que Canary não caberia aqui: canary manda tráfego para as duas
+versões ao mesmo tempo, e com um banco por pod o mesmo usuário veria listas
+diferentes a cada request. Continuidade exigiria um `PersistentVolumeClaim` ou banco
+externo, e isso é ortogonal à estratégia de deploy.
+
