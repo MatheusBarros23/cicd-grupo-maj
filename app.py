@@ -324,7 +324,7 @@ MAIN_HTML = '''
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-  <title>{{ app_name }}</title>
+  <title>{{ app_name }} v2</title>
   ''' + THEME_SCRIPT + '''
   <style>
     ''' + BASE_CSS + '''
@@ -451,6 +451,7 @@ MAIN_HTML = '''
       <div>
         <h1>{{ app_name }}</h1>
         <span class="pod-badge">pod: {{ hostname }}</span>
+        <span class="pod-badge">blue-green teste v2</span>
       </div>
       <div class="header-actions">
         <button id="theme-btn" class="btn-header" onclick="toggleTheme()">☾</button>
