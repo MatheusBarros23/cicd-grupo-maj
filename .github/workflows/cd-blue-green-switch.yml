@@ -1,0 +1,131 @@
+name: CD Blue/Green switch
+
+run-name: 'Blue/Green switch -> trafego para ${{ inputs.color }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      color:
+        description: 'Cor que deve receber o trafego de producao'
+        required: true
+        type: choice
+        options:
+          - blue
+          - green
+        default: blue
+
+permissions:
+  contents: read
+
+env:
+  NAMESPACE: todolist-bg
+  BASE_HOST: todolist-bg.local
+
+jobs:
+  switch:
+    name: Vira o trafego de producao
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      # Sem checkout: o switch nao le nenhum arquivo do repo. Ele so altera o
+      # estado de um Service que ja existe no cluster.
+      - name: Configure SSH key
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          if [ -z "$SSH_KEY" ] || [ -z "$EC2_HOST" ] || [ -z "$EC2_USER" ]; then
+            echo "::error::Cadastre os secrets EC2_SSH_KEY, EC2_HOST e EC2_USER."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Confirma saude do slot e vira o trafego
+        id: switch
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          KIND_CLUSTER: ${{ vars.KIND_CLUSTER || 'devops-labs' }}
+          COLOR: ${{ inputs.color }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" \
+            "KIND_CLUSTER='$KIND_CLUSTER' NS='$NAMESPACE' COLOR='$COLOR' \
+             BASE_HOST='$BASE_HOST' bash -s" <<'EOF'
+          set -euo pipefail
+
+          kubectl config use-context "kind-${KIND_CLUSTER}"
+
+          SLOT_HOST="${COLOR}.${BASE_HOST}"
+
+          # Virar trafego para um slot doente e causar incidente com um clique.
+          # Este health check e o gate do cutover.
+          echo "verificando saude do slot $COLOR em $SLOT_HOST"
+          healthy=0
+          for _ in $(seq 1 20); do
+            if curl -fsS -H "Host: $SLOT_HOST" http://localhost/healthz >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 3
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::slot $COLOR nao esta saudavel — switch abortado, producao intacta"
+            exit 1
+          fi
+          echo "slot $COLOR saudavel"
+
+          PREV=$(kubectl get svc todolist -n "$NS" -o jsonpath='{.spec.selector.color}')
+          if [ "$PREV" = "$COLOR" ]; then
+            echo "::warning::producao ja esta em $COLOR — o switch e no-op"
+          fi
+          echo "producao esta em $PREV; virando para $COLOR"
+
+          # O CUTOVER: a unica mudanca e o selector do Service de producao. O
+          # Ingress e os hosts nao sao tocados, e por isso a operacao e
+          # instantanea e reversivel.
+          kubectl patch svc todolist -n "$NS" \
+            -p "{\"spec\":{\"selector\":{\"app\":\"todolist\",\"color\":\"$COLOR\"}}}"
+
+          for _ in $(seq 1 20); do
+            if curl -fsS -H "Host: $BASE_HOST" http://localhost/healthz >/dev/null; then
+              echo "producao OK em $BASE_HOST, servindo $COLOR"
+              echo ""
+              echo "=================================================="
+              echo " ROLLBACK"
+              echo " Rode este mesmo workflow com color=$PREV,"
+              echo " ou direto no cluster:"
+              echo "   kubectl patch svc todolist -n $NS \\"
+              echo "     -p '{\"spec\":{\"selector\":{\"app\":\"todolist\",\"color\":\"$PREV\"}}}'"
+              echo " A cor $PREV continua rodando: a reversao e imediata."
+              echo "=================================================="
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::producao nao respondeu apos o switch — faca rollback para $PREV"
+          exit 1
+          EOF
+
+      - name: Summary
+        if: always()
+        env:
+          COLOR: ${{ inputs.color }}
+        run: |
+          {
+            echo "### Blue/Green switch"
+            echo ""
+            echo "| campo | valor |"
+            echo "|---|---|"
+            echo "| trafego agora em | \`${COLOR}\` |"
+            echo "| host de producao | \`${BASE_HOST}\` |"
+            echo ""
+            echo "**Rollback:** rode este workflow novamente com a cor anterior."
+            echo "A cor antiga continua rodando, entao a reversao e imediata —"
+            echo "o log do step anterior imprime o comando exato."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,142 @@
+name: CD Blue/Green deploy
+
+# A aba Actions passa a mostrar cor e tag de cada execucao — vira evidencia.
+run-name: 'Blue/Green deploy -> ${{ inputs.color }} (${{ inputs.image_tag }})'
+
+on:
+  workflow_dispatch:
+    inputs:
+      color:
+        description: 'Slot de cor onde publicar a versao'
+        required: true
+        type: choice
+        options:
+          - blue
+          - green
+        default: blue
+      image_tag:
+        description: 'Tag da imagem no GHCR (prefira o SHA do commit)'
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: app-k8s-todolist
+  NAMESPACE: todolist-bg
+  BASE_HOST: todolist-bg.local
+  BOOTSTRAP: k8s/blue-green/bootstrap.yaml
+
+jobs:
+  deploy:
+    name: Deploy no slot de cor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configure SSH key
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          if [ -z "$SSH_KEY" ] || [ -z "$EC2_HOST" ] || [ -z "$EC2_USER" ]; then
+            echo "::error::Cadastre os secrets EC2_SSH_KEY, EC2_HOST e EC2_USER."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          # tr -d '\r': chave copiada por editor Windows vem com CRLF e o
+          # OpenSSH a recusa com um Permission denied sem causa aparente.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Mesma derivacao do job publish do ci.yml e do cd.yml.
+      - name: Resolve image reference
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          repo="ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/$IMAGE_NAME"
+          echo "ref=${repo}:${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy bootstrap manifest to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          scp -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$BOOTSTRAP" "$EC2_USER@$EC2_HOST:~/blue-green-bootstrap.yaml"
+
+      # O heredoc e quoted ('EOF'): nada expande no runner. As variaveis vao no
+      # comando ssh e sao resolvidas do lado remoto, onde o script roda.
+      - name: Deploy no slot e smoke test
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+          KIND_CLUSTER: ${{ vars.KIND_CLUSTER || 'devops-labs' }}
+          COLOR: ${{ inputs.color }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new \
+            "$EC2_USER@$EC2_HOST" \
+            "IMAGE='$IMAGE' KIND_CLUSTER='$KIND_CLUSTER' NS='$NAMESPACE' \
+             COLOR='$COLOR' BASE_HOST='$BASE_HOST' bash -s" <<'EOF'
+          set -euo pipefail
+
+          kubectl config use-context "kind-${KIND_CLUSTER}"
+
+          # Bootstrap idempotente: cria as duas cores, os tres Services e o
+          # Ingress apenas na primeira execucao.
+          if ! kubectl get ns "$NS" >/dev/null 2>&1; then
+            echo "namespace $NS ausente — aplicando bootstrap"
+            kubectl apply -f ~/blue-green-bootstrap.yaml
+          fi
+
+          ACTIVE=$(kubectl get svc todolist -n "$NS" -o jsonpath='{.spec.selector.color}')
+          if [ "$ACTIVE" = "$COLOR" ]; then
+            echo "::warning::$COLOR ja e a cor de producao — este deploy vai direto ao trafego, anulando a rede de protecao do blue/green"
+          else
+            echo "producao esta em $ACTIVE; publicando em $COLOR sem tocar no trafego"
+          fi
+
+          kubectl set image "deployment/todolist-$COLOR" "todolist=$IMAGE" -n "$NS"
+          kubectl rollout status "deployment/todolist-$COLOR" -n "$NS" --timeout=120s
+
+          # Smoke test no host FIXO do slot, nunca no de producao: o objetivo e
+          # validar a versao nova antes de qualquer usuario ver.
+          SLOT_HOST="${COLOR}.${BASE_HOST}"
+          for _ in $(seq 1 20); do
+            if curl -fsS -H "Host: $SLOT_HOST" http://localhost/healthz; then
+              echo
+              echo "smoke test OK em $SLOT_HOST"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::smoke test falhou no slot $COLOR ($SLOT_HOST)"
+          exit 1
+          EOF
+
+      - name: Summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+          COLOR: ${{ inputs.color }}
+        run: |
+          {
+            echo "### Blue/Green deploy"
+            echo ""
+            echo "| campo | valor |"
+            echo "|---|---|"
+            echo "| slot | \`${COLOR}\` |"
+            echo "| imagem | \`${IMAGE}\` |"
+            echo "| host do slot | \`${COLOR}.${BASE_HOST}\` |"
+            echo ""
+            echo "Trafego de producao **nao** foi alterado."
+            echo "Para o cutover, rode o workflow *CD Blue/Green switch*."
+          } >> "$GITHUB_STEP_SUMMARY"
